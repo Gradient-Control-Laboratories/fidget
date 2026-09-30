@@ -161,6 +161,18 @@ opcodes!(
     #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
     pub enum SsaOp<u32> {
         // default variants
+        /// Mesh-distance oracle leaf: `(out, asset_id, x_in, y_in, z_in)`.
+        /// Evaluated by looking up the asset's triangle BSP on the host
+        /// side and returning the signed distance from the (x, y, z)
+        /// computed at the supplied input registers to the triangle set.
+        ///
+        /// The x/y/z register operands let `remap()` actually shift the
+        /// oracle's sample point; with no remap they're just the global
+        /// X/Y/Z input slots, matching the previous semantics.
+        ///
+        /// Cannot be JIT-compiled — JIT/bytecode backends panic on this
+        /// op; VM eval dispatches to a registered host callback.
+        MeshOracle(u32, u32, u32, u32, u32),
     }
 );
 
@@ -218,7 +230,8 @@ impl SsaOp {
             | SsaOp::AndRegImm(out, ..)
             | SsaOp::AndRegReg(out, ..)
             | SsaOp::OrRegImm(out, ..)
-            | SsaOp::OrRegReg(out, ..) => Some(*out),
+            | SsaOp::OrRegReg(out, ..)
+            | SsaOp::MeshOracle(out, ..) => Some(*out),
             SsaOp::Output(..) => None,
         }
     }
@@ -268,7 +281,8 @@ impl SsaOp {
             | SsaOp::MixImmReg(..)
             | SsaOp::ModRegReg(..)
             | SsaOp::ModRegImm(..)
-            | SsaOp::ModImmReg(..) => false,
+            | SsaOp::ModImmReg(..)
+            | SsaOp::MeshOracle(..) => false,
             SsaOp::MinRegImm(..)
             | SsaOp::MaxRegImm(..)
             | SsaOp::MinRegReg(..)
@@ -302,6 +316,17 @@ opcodes!(
 
         /// Write from a register to a memory slot
         Store(u8, u32),
+
+        /// Mesh-distance oracle leaf:
+        /// `(out, asset_slot, x_reg, y_reg, z_reg)`. See
+        /// [`SsaOp::MeshOracle`] for semantics — the x/y/z operands carry
+        /// register indices for the sample-point computation, allowing
+        /// `remap()` to substitute non-default coordinates. `asset_slot`
+        /// indexes the tape's table of asset ids
+        /// ([`RegTape::oracle_asset`](crate::compiler::RegTape::oracle_asset)),
+        /// which keeps the op at 8 bytes where a `u32` id would make every
+        /// op 12.
+        MeshOracle(u8, u16, u8, u8, u8),
     }
 );
 
@@ -384,6 +409,13 @@ impl RegOp {
                 let _: u32 = *imm; // type-checking pattern
                 f(reg)
             }
+            RegOp::MeshOracle(out, asset_slot, x, y, z) => {
+                let _: u16 = *asset_slot; // type-checking pattern
+                f(out);
+                f(x);
+                f(y);
+                f(z);
+            }
         }
     }
 
@@ -464,6 +496,13 @@ impl RegOp {
             | RegOp::Load(reg, imm) => {
                 let _: u32 = *imm; // type-checking pattern
                 f(*reg)
+            }
+            RegOp::MeshOracle(out, asset_slot, x, y, z) => {
+                let _: u16 = *asset_slot; // type-checking pattern
+                f(*out);
+                f(*x);
+                f(*y);
+                f(*z);
             }
         }
     }

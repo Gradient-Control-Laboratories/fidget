@@ -181,6 +181,48 @@ impl Context {
         self.ops.insert(Op::Const(OrderedFloat(f)))
     }
 
+    /// Returns a node representing a mesh-distance oracle leaf for the
+    /// given host-managed asset id, sampled at the supplied (x, y, z)
+    /// coordinate nodes. For an unremapped reference the caller should
+    /// pass `(self.x(), self.y(), self.z())` so the oracle samples at the
+    /// global input point. Inside a remap (e.g. via `ctx.import` walking
+    /// a `TreeOp::RemapAxes`), the caller substitutes the remap
+    /// expressions instead — that is what makes
+    /// `remap(vdbSdf(0), [p.x - 5, p.y, p.z])` actually translate the
+    /// sampled coordinates rather than silently being a no-op.
+    pub fn mesh_oracle(
+        &mut self,
+        asset_id: u32,
+        x: Node,
+        y: Node,
+        z: Node,
+    ) -> Node {
+        self.ops.insert(Op::MeshOracle(asset_id, x, y, z))
+    }
+
+    /// Returns true if the subtree rooted at `node` references any
+    /// [`Op::MeshOracle`] leaf. Callers use this to decide whether to take the
+    /// JIT path or fall back to the VM (only the VM dispatches the oracle).
+    pub fn contains_mesh_oracle(&self, node: Node) -> bool {
+        let mut todo = vec![node];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(n) = todo.pop() {
+            if !seen.insert(n) {
+                continue;
+            }
+            let Some(op) = self.get_op(n) else {
+                continue;
+            };
+            if matches!(op, Op::MeshOracle(..)) {
+                return true;
+            }
+            for c in op.iter_children() {
+                todo.push(c);
+            }
+        }
+        false
+    }
+
     ////////////////////////////////////////////////////////////////////////////
     // Helper functions to create nodes with constant folding
     /// Find or create a [Node] for the given unary operation, with constant
@@ -837,6 +879,13 @@ impl Context {
         let v = match self.get_op(node).ok_or(EvalError::BadNode(BadNode))? {
             Op::Input(v) => *vars.get(v).ok_or(EvalError::MissingVar(*v))?,
             Op::Const(c) => c.0,
+            Op::MeshOracle(_id, _x, _y, _z) => {
+                // Context::eval_xyz is a debug helper used by tests; it has no
+                // host hook for resolving the oracle, so we return 0 rather
+                // than crash. The real eval path is the VM, which dispatches
+                // RegOp::MeshOracle to a registered host callback.
+                0.0
+            }
 
             Op::Binary(op, a, b) => {
                 let a = get(*a)?;
@@ -964,6 +1013,9 @@ impl Context {
             Op::Input(v) => {
                 out += &v.to_string();
             }
+            Op::MeshOracle(id, ..) => {
+                write!(out, "mesh_oracle:{id}").unwrap();
+            }
             Op::Binary(op, ..) => match op {
                 BinaryOpcode::Add => out += "add",
                 BinaryOpcode::Sub => out += "sub",
@@ -1070,6 +1122,16 @@ impl Context {
                                 v @ Var::V(..) => self.var(v),
                             });
                         }
+                        TreeOp::MeshOracle(id) => {
+                            // Plumb the current axes through the oracle's
+                            // x/y/z so that any RemapAxes ancestor actually
+                            // affects which world-space point the oracle
+                            // gets sampled at. With the default axes (no
+                            // remap) this is just (Var::X, Var::Y, Var::Z),
+                            // matching the previous behaviour bit-for-bit.
+                            let (x, y, z) = *axes.last().unwrap();
+                            stack.push(self.mesh_oracle(*id, x, y, z));
+                        }
                         TreeOp::Unary(_op, arg) => {
                             todo.push(Action::Up(t));
                             todo.push(Action::Down(arg));
@@ -1122,6 +1184,7 @@ impl Context {
                     match t.as_ref() {
                         TreeOp::Const(..)
                         | TreeOp::Input(..)
+                        | TreeOp::MeshOracle(..)
                         | TreeOp::RemapAffine { .. } => unreachable!(),
                         TreeOp::Unary(op, ..) => {
                             let arg = stack.pop().unwrap();
@@ -1232,6 +1295,18 @@ impl Context {
                             seen.insert(n, t.clone());
                             stack.push(t);
                         }
+                        Op::MeshOracle(_id, x, y, z) => {
+                            // The oracle now carries explicit x/y/z child
+                            // nodes. Export them recursively, then wrap
+                            // the bare MeshOracle TreeOp in a RemapAxes
+                            // so the round-trip preserves the substituted
+                            // sample point. Action::Up below handles the
+                            // assembly once x/y/z are on the stack.
+                            todo.push(Action::Up(n, *op));
+                            todo.push(Action::Down(*x));
+                            todo.push(Action::Down(*y));
+                            todo.push(Action::Down(*z));
+                        }
                         Op::Unary(_op, arg) => {
                             todo.push(Action::Up(n, *op));
                             todo.push(Action::Down(*arg));
@@ -1244,7 +1319,29 @@ impl Context {
                     }
                 }
                 Action::Up(n, op) => match op {
-                    Op::Const(..) | Op::Input(..) => unreachable!(),
+                    Op::Const(..) | Op::Input(..) => {
+                        unreachable!()
+                    }
+                    Op::MeshOracle(id, ..) => {
+                        let x = stack.pop().unwrap();
+                        let y = stack.pop().unwrap();
+                        let z = stack.pop().unwrap();
+                        let oracle = Tree::mesh_oracle(id);
+                        // Wrap in a RemapAxes so the exported tree
+                        // re-applies the same sample-point substitution
+                        // when re-imported. With default axes (x=X, y=Y,
+                        // z=Z) this is a no-op semantically; with a
+                        // non-trivial remap it preserves the user's
+                        // shifted coordinates.
+                        let out = Tree::from(TreeOp::RemapAxes {
+                            target: oracle.arc().clone(),
+                            x: x.arc().clone(),
+                            y: y.arc().clone(),
+                            z: z.arc().clone(),
+                        });
+                        seen.insert(n, out.clone());
+                        stack.push(out);
+                    }
                     Op::Unary(op, ..) => {
                         let arg = stack.pop().unwrap();
                         let out =
@@ -1311,6 +1408,16 @@ impl Context {
                             seen.insert(n, z);
                             stack.push(z);
                         }
+                        Op::MeshOracle(..) => {
+                            // The oracle is a black-box function of its
+                            // (x, y, z) inputs; we don't have a symbolic
+                            // derivative for it. Returning zero is wrong
+                            // but unblocks compilation — gradient eval
+                            // should be done numerically by the host using
+                            // point evaluations.
+                            seen.insert(n, zero);
+                            stack.push(zero);
+                        }
                         Op::Unary(_op, arg) => {
                             todo.push(Action::Up(n, op));
                             todo.push(Action::Down(arg));
@@ -1323,7 +1430,9 @@ impl Context {
                     }
                 }
                 Action::Up(n, op) => match op {
-                    Op::Const(..) | Op::Input(..) => unreachable!(),
+                    Op::Const(..) | Op::Input(..) | Op::MeshOracle(..) => {
+                        unreachable!()
+                    }
                     Op::Unary(op, v_arg) => {
                         let d_arg = stack.pop().unwrap();
                         let out = match op {

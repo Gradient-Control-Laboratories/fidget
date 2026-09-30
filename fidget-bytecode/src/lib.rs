@@ -154,6 +154,11 @@ impl From<RegOp> for BytecodeOp {
             | RegOp::ModImmReg(..) => BytecodeOp::Mod,
             RegOp::AndRegReg(..) | RegOp::AndRegImm(..) => BytecodeOp::And,
             RegOp::OrRegReg(..) | RegOp::OrRegImm(..) => BytecodeOp::Or,
+            // No bytecode encoding for the host-callback oracle; see the
+            // MeshOracle arm in `Bytecode::new_with_input_map`.
+            RegOp::MeshOracle(..) => {
+                panic!("MeshOracle op has no bytecode encoding")
+            }
         }
     }
 }
@@ -255,6 +260,16 @@ impl Bytecode {
                 }
             };
             match op {
+                // Bytecode export refuses to encode the host-callback oracle.
+                // Same constraint as the JIT — host must route MeshOracle
+                // programs through the VM evaluator instead.
+                RegOp::MeshOracle(..) => {
+                    panic!(
+                        "MeshOracle op in bytecode tape — host should have \
+                         routed to VmShape; check contains_mesh_oracle before \
+                         requesting bytecode"
+                    );
+                }
                 RegOp::Input(reg, slot) => {
                     store_reg(1, reg)?;
                     imm = Some(input_map.get(&slot).cloned().unwrap_or(slot));

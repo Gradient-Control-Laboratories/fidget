@@ -109,6 +109,20 @@ pub enum Op {
     Const(OrderedFloat<f32>),
     Binary(BinaryOpcode, Node, Node),
     Unary(UnaryOpcode, Node),
+    /// Mesh-distance oracle leaf, parameterized by a host-managed asset id
+    /// plus three child nodes giving the (x, y, z) world-space coordinates
+    /// at which the oracle is sampled. The default lowering for a bare
+    /// `Tree::mesh_oracle(id)` plugs in the canonical `Var::X / Y / Z`
+    /// input nodes for x/y/z, so the oracle behaves like before; when a
+    /// `RemapAxes` ancestor pushes substituted axes during `ctx.import`,
+    /// those expressions become the x/y/z children — which is how
+    /// `remap(vdbSdf(0), [p.x - 5, ...])` actually shifts the sampled
+    /// coordinates instead of silently being a no-op.
+    ///
+    /// Programs that include this op cannot be JIT-compiled — the
+    /// JIT/bytecode backends will refuse to compile, and the host must
+    /// fall back to VM eval.
+    MeshOracle(u32, Node, Node, Node),
 }
 
 fn dot_color_to_rgb(s: &str) -> &'static str {
@@ -126,7 +140,7 @@ impl Op {
     pub fn dot_node_color(&self) -> &str {
         match self {
             Op::Const(..) => "green",
-            Op::Input(..) => "red",
+            Op::Input(..) | Op::MeshOracle(..) => "red",
             Op::Binary(BinaryOpcode::Min | BinaryOpcode::Max, ..) => {
                 "dodgerblue"
             }
@@ -138,17 +152,18 @@ impl Op {
     pub fn dot_node_shape(&self) -> &str {
         match self {
             Op::Const(..) => "oval",
-            Op::Input(..) => "circle",
+            Op::Input(..) | Op::MeshOracle(..) => "circle",
             Op::Binary(..) | Op::Unary(..) => "box",
         }
     }
 
-    /// Iterates over children, producing 0, 1, or 2 values
+    /// Iterates over children, producing 0, 1, 2, or 3 values
     pub fn iter_children(&self) -> impl Iterator<Item = Node> {
         let out = match self {
-            Op::Binary(_, a, b) => [Some(*a), Some(*b)],
-            Op::Unary(_, a) => [Some(*a), None],
-            Op::Input(..) | Op::Const(..) => [None, None],
+            Op::Binary(_, a, b) => [Some(*a), Some(*b), None],
+            Op::Unary(_, a) => [Some(*a), None, None],
+            Op::MeshOracle(_, x, y, z) => [Some(*x), Some(*y), Some(*z)],
+            Op::Input(..) | Op::Const(..) => [None, None, None],
         };
         out.into_iter().flatten()
     }

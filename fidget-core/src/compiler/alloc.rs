@@ -271,6 +271,9 @@ impl<const N: usize> RegisterAllocator<N> {
             SsaOp::Output(reg, i) => self.op_output(reg, i),
             SsaOp::Input(out, i) => self.op_input(out, i),
             SsaOp::CopyImm(out, imm) => self.op_copy_imm(out, imm),
+            SsaOp::MeshOracle(out, asset_id, x, y, z) => {
+                self.op_mesh_oracle(out, asset_id, x, y, z);
+            }
 
             SsaOp::NegReg(..)
             | SsaOp::AbsReg(..)
@@ -671,6 +674,56 @@ impl<const N: usize> RegisterAllocator<N> {
         let r_x = self.get_out_reg(out);
         self.out.push(op(r_x));
         self.release_reg(r_x);
+    }
+
+    /// Lowers a 3-input mesh-oracle op into a [`RegOp::MeshOracle`].
+    /// MeshOracle is rare enough that we don't bother with the
+    /// pattern-matching contortions of `op_reg_reg`; instead we force
+    /// each of x/y/z into a physical register (loading from memory or
+    /// allocating fresh on demand), emit the op, then release the
+    /// output. The allocator's existing bind/release machinery handles
+    /// liveness — the 3 input registers stay live for the rest of the
+    /// SSA range that consumed them, and the output register is freed
+    /// since the SSA value is now produced.
+    #[inline]
+    fn op_mesh_oracle(
+        &mut self,
+        out: u32,
+        asset_id: u32,
+        x_ssa: u32,
+        y_ssa: u32,
+        z_ssa: u32,
+    ) {
+        let r_out = self.get_out_reg(out);
+        let r_x = self.force_input_reg(x_ssa);
+        let r_y = self.force_input_reg(y_ssa);
+        let r_z = self.force_input_reg(z_ssa);
+        let slot = self.out.oracle_slot(asset_id);
+        self.out.push(RegOp::MeshOracle(r_out, slot, r_x, r_y, r_z));
+        self.release_reg(r_out);
+    }
+
+    /// Returns a physical register holding the value of the given SSA
+    /// register, materializing it via a load or fresh allocation if
+    /// needed. Used by `op_mesh_oracle` (and any future ternary-read
+    /// op) to coerce inputs into registers without the
+    /// 27-case-table treatment of `op_reg_reg`.
+    #[inline]
+    fn force_input_reg(&mut self, ssa: u32) -> u8 {
+        match self.get_allocation(ssa) {
+            Allocation::Register(r) => r,
+            Allocation::Memory(m) => {
+                let r = self.get_register();
+                self.push_store(r, m);
+                self.bind_register(ssa, r);
+                r
+            }
+            Allocation::Unassigned => {
+                let r = self.get_register();
+                self.bind_register(ssa, r);
+                r
+            }
+        }
     }
 
     /// Pushes a [`CopyImm`](crate::compiler::RegOp::CopyImm) operation to the

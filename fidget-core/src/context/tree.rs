@@ -22,6 +22,9 @@ pub enum TreeOp {
     Const(f32),
     Binary(BinaryOpcode, Arc<TreeOp>, Arc<TreeOp>),
     Unary(UnaryOpcode, Arc<TreeOp>),
+    /// Mesh-distance oracle leaf, parameterized by a host-managed asset id.
+    /// See [`Op::MeshOracle`](super::op::Op::MeshOracle) for semantics.
+    MeshOracle(u32),
     /// Lazy remapping of trees
     ///
     /// When imported into a `Context`, all `x/y/z` clauses within `target` will
@@ -119,6 +122,11 @@ impl PartialEq for TreeOp {
                         return false;
                     }
                 }
+                (TreeOp::MeshOracle(a), TreeOp::MeshOracle(b)) => {
+                    if *a != *b {
+                        return false;
+                    }
+                }
                 (TreeOp::Unary(op_a, ..), TreeOp::Unary(op_b, ..)) => {
                     if *op_a != *op_b {
                         return false;
@@ -173,12 +181,17 @@ impl TreeOp {
 
     /// Returns `true` if the given child does not recurse
     fn does_not_recurse(&self) -> bool {
-        matches!(self, TreeOp::Const(..) | TreeOp::Input(..))
+        matches!(
+            self,
+            TreeOp::Const(..) | TreeOp::Input(..) | TreeOp::MeshOracle(..)
+        )
     }
 
     fn iter_children(&self) -> impl Iterator<Item = &Arc<TreeOp>> {
         match self {
-            TreeOp::Const(..) | TreeOp::Input(..) => [None, None, None, None],
+            TreeOp::Const(..)
+            | TreeOp::Input(..)
+            | TreeOp::MeshOracle(..) => [None, None, None, None],
             TreeOp::Unary(_op, arg) => [Some(arg), None, None, None],
             TreeOp::Binary(_op, lhs, rhs) => [Some(lhs), Some(rhs), None, None],
             TreeOp::RemapAxes { target, x, y, z } => {
@@ -194,7 +207,9 @@ impl TreeOp {
 
     fn iter_children_mut(&mut self) -> impl Iterator<Item = &mut Arc<TreeOp>> {
         match self {
-            TreeOp::Const(..) | TreeOp::Input(..) => [None, None, None, None],
+            TreeOp::Const(..)
+            | TreeOp::Input(..)
+            | TreeOp::MeshOracle(..) => [None, None, None, None],
             TreeOp::Unary(_op, arg) => [Some(arg), None, None, None],
             TreeOp::Binary(_op, lhs, rhs) => [Some(lhs), Some(rhs), None, None],
             TreeOp::RemapAxes { target, x, y, z } => {
@@ -242,6 +257,7 @@ impl std::hash::Hash for TreeOp {
                     match t {
                         TreeOp::Input(i) => i.hash(&mut hasher),
                         TreeOp::Const(v) => OrderedFloat(*v).hash(&mut hasher),
+                        TreeOp::MeshOracle(id) => id.hash(&mut hasher),
                         TreeOp::Binary(op, _lhs, _rhs) => op.hash(&mut hasher),
                         TreeOp::Unary(op, _arg) => op.hash(&mut hasher),
                         TreeOp::RemapAxes { .. } => {
@@ -440,6 +456,11 @@ impl Tree {
     }
     pub fn constant(f: f32) -> Self {
         Tree(Arc::new(TreeOp::Const(f)))
+    }
+    /// Constructs a leaf that evaluates to the signed distance from the
+    /// implicit `(x, y, z)` to the host-registered mesh asset `asset_id`.
+    pub fn mesh_oracle(asset_id: u32) -> Self {
+        Tree(Arc::new(TreeOp::MeshOracle(asset_id)))
     }
     fn op_unary(a: Tree, op: UnaryOpcode) -> Self {
         Tree(Arc::new(TreeOp::Unary(op, a.0)))

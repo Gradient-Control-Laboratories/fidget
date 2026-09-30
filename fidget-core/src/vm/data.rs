@@ -171,8 +171,20 @@ impl<const N: usize> VmData<N> {
 
             match &mut op {
                 SsaOp::Output(..) => unreachable!(),
-                SsaOp::Input(index, ..) | SsaOp::CopyImm(index, ..) => {
+                SsaOp::Input(index, ..)
+                | SsaOp::CopyImm(index, ..) => {
                     *index = new_index;
+                }
+                SsaOp::MeshOracle(index, _asset, x_in, y_in, z_in) => {
+                    // MeshOracle now reads x/y/z from SSA registers; the
+                    // simplification pass rewrites every input register
+                    // index alongside the output, so the oracle keeps
+                    // reading the right (possibly remapped) sample point
+                    // after dead-code/choice-pruning passes.
+                    *index = new_index;
+                    *x_in = workspace.get_or_insert_active(*x_in);
+                    *y_in = workspace.get_or_insert_active(*y_in);
+                    *z_in = workspace.get_or_insert_active(*z_in);
                 }
                 SsaOp::NegReg(index, arg)
                 | SsaOp::AbsReg(index, arg)

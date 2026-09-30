@@ -60,6 +60,7 @@ pub use context::Context;
 
 pub mod compiler;
 pub mod eval;
+pub mod mesh_oracle;
 pub mod render;
 pub mod rng;
 pub mod shape;

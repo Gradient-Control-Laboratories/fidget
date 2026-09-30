@@ -7,10 +7,11 @@ use crate::{
         BulkEvalError, BulkEvaluator, BulkOutput, Function, MathFunction, Tape,
         Trace, TracingEvalError, TracingEvaluator,
     },
+    mesh_oracle,
     render::{RenderHints, TileSizes},
     shape::Shape,
     types::{FloatExt, Grad, Interval},
-    var::VarMap,
+    var::{Var, VarMap},
 };
 use std::sync::Arc;
 
@@ -335,6 +336,9 @@ impl<const N: usize> TracingEvaluator for VmIntervalEval<N> {
         vars: &[Interval],
     ) -> Result<(&[Interval], Option<&VmTrace>), TracingEvalError> {
         tape.vars().check_tracing_arguments(vars)?;
+        let _x_slot = tape.vars().get(&Var::X);
+        let _y_slot = tape.vars().get(&Var::Y);
+        let _z_slot = tape.vars().get(&Var::Z);
         let tape = tape.data();
         self.0.resize_slots(tape);
 
@@ -348,6 +352,20 @@ impl<const N: usize> TracingEvaluator for VmIntervalEval<N> {
                 }
                 RegOp::Input(out, i) => {
                     v[out] = vars[i as usize];
+                }
+                RegOp::MeshOracle(out, slot, x_in, y_in, z_in) => {
+                    let asset_id = tape.asm().oracle_asset(slot);
+                    // Read x/y/z from registers — these were filled in
+                    // either by RegOp::Input (the no-remap case where
+                    // x_in/y_in/z_in are the X/Y/Z input slots) or by an
+                    // earlier op that produced the remapped sample point.
+                    let zero = Interval::new(0.0, 0.0);
+                    let x = v[x_in];
+                    let y = v[y_in];
+                    let z = v[z_in];
+                    v[out] = mesh_oracle::lookup(asset_id)
+                        .map(|o| o.interval(x, y, z))
+                        .unwrap_or(zero);
                 }
                 RegOp::NegReg(out, arg) => {
                     v[out] = -v[arg];
@@ -551,6 +569,9 @@ impl<const N: usize> TracingEvaluator for VmPointEval<N> {
         vars: &[f32],
     ) -> Result<(&[f32], Option<&VmTrace>), TracingEvalError> {
         tape.vars().check_tracing_arguments(vars)?;
+        let _x_slot = tape.vars().get(&Var::X);
+        let _y_slot = tape.vars().get(&Var::Y);
+        let _z_slot = tape.vars().get(&Var::Z);
         let tape = tape.data();
         self.0.resize_slots(tape);
 
@@ -564,6 +585,15 @@ impl<const N: usize> TracingEvaluator for VmPointEval<N> {
                 }
                 RegOp::Input(out, i) => {
                     v[out] = vars[i as usize];
+                }
+                RegOp::MeshOracle(out, slot, x_in, y_in, z_in) => {
+                    let asset_id = tape.asm().oracle_asset(slot);
+                    let x = v[x_in];
+                    let y = v[y_in];
+                    let z = v[z_in];
+                    v[out] = mesh_oracle::lookup(asset_id)
+                        .map(|o| o.point(x, y, z))
+                        .unwrap_or(0.0);
                 }
                 RegOp::NegReg(out, arg) => {
                     v[out] = -v[arg];
@@ -801,6 +831,9 @@ impl<const N: usize> BulkEvaluator for VmFloatSliceEval<N> {
         vars: &[V],
     ) -> Result<BulkOutput<'_, f32>, BulkEvalError> {
         tape.vars().check_bulk_arguments(vars)?;
+        let _x_slot = tape.vars().get(&Var::X);
+        let _y_slot = tape.vars().get(&Var::Y);
+        let _z_slot = tape.vars().get(&Var::Z);
         let tape = tape.data();
 
         let size = vars.first().map(|v| v.len()).unwrap_or(0);
@@ -815,6 +848,19 @@ impl<const N: usize> BulkEvaluator for VmFloatSliceEval<N> {
                 }
                 RegOp::Input(out, i) => {
                     v[out][0..size].copy_from_slice(&vars[i as usize]);
+                }
+                RegOp::MeshOracle(out, slot, x_in, y_in, z_in) => {
+                    let asset_id = tape.asm().oracle_asset(slot);
+                    let oracle = mesh_oracle::lookup(asset_id);
+                    for i in 0..size {
+                        let x = v[x_in][i];
+                        let y = v[y_in][i];
+                        let z = v[z_in][i];
+                        v[out][i] = oracle
+                            .as_ref()
+                            .map(|o| o.point(x, y, z))
+                            .unwrap_or(0.0);
+                    }
                 }
                 RegOp::NegReg(out, arg) => {
                     for i in 0..size {
@@ -1096,6 +1142,9 @@ impl<const N: usize> BulkEvaluator for VmGradSliceEval<N> {
         vars: &[V],
     ) -> Result<BulkOutput<'_, Grad>, BulkEvalError> {
         tape.vars().check_bulk_arguments(vars)?;
+        let _x_slot = tape.vars().get(&Var::X);
+        let _y_slot = tape.vars().get(&Var::Y);
+        let _z_slot = tape.vars().get(&Var::Z);
         let tape = tape.data();
         let size = vars.first().map(|v| v.len()).unwrap_or(0);
         self.0.resize_slots(tape, size);
@@ -1109,6 +1158,51 @@ impl<const N: usize> BulkEvaluator for VmGradSliceEval<N> {
                 }
                 RegOp::Input(out, i) => {
                     v[out][0..size].copy_from_slice(&vars[i as usize]);
+                }
+                RegOp::MeshOracle(out, slot, x_in, y_in, z_in) => {
+                    let asset_id = tape.asm().oracle_asset(slot);
+                    // The oracle's `grad` returns (f, df/dx_local,
+                    // df/dy_local, df/dz_local) where the locals are
+                    // whatever (possibly remapped) coordinates the
+                    // x/y/z input registers hold. To produce a Grad
+                    // expressed in WORLD partial derivatives — which is
+                    // what the rest of the tape (and the MDC Hermite
+                    // QEF) expects — we apply the chain rule using the
+                    // input registers' own Grads:
+                    //
+                    //   df/dxw = df/dxl·∂xl/∂xw + df/dyl·∂yl/∂xw + df/dzl·∂zl/∂xw
+                    //
+                    // For the no-remap case the input Grads are the
+                    // canonical (1,0,0)/(0,1,0)/(0,0,1) basis and the
+                    // chain reduces to the identity — same numbers as
+                    // before the refactor. With a remap like
+                    // `remap(vdbSdf(0), [p.x, p.y, 0.5*p.z])` the
+                    // z-input Grad is (0,0,0.5) so the world-space
+                    // df/dzw is correctly halved, instead of MDC
+                    // receiving the local gradient and producing
+                    // increasingly stretched triangulation as the
+                    // distance from origin grows.
+                    let oracle = mesh_oracle::lookup(asset_id);
+                    let zero = Grad::new(0.0, 0.0, 0.0, 0.0);
+                    for i in 0..size {
+                        let gx = v[x_in][i];
+                        let gy = v[y_in][i];
+                        let gz = v[z_in][i];
+                        let local = oracle
+                            .as_ref()
+                            .map(|o| o.grad(gx.v, gy.v, gz.v))
+                            .unwrap_or(zero);
+                        let dxw = local.dx * gx.dx
+                            + local.dy * gy.dx
+                            + local.dz * gz.dx;
+                        let dyw = local.dx * gx.dy
+                            + local.dy * gy.dy
+                            + local.dz * gz.dy;
+                        let dzw = local.dx * gx.dz
+                            + local.dy * gy.dz
+                            + local.dz * gz.dz;
+                        v[out][i] = Grad::new(local.v, dxw, dyw, dzw);
+                    }
                 }
                 RegOp::NegReg(out, arg) => {
                     for i in 0..size {

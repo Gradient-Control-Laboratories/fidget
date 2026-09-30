@@ -121,6 +121,29 @@ impl SsaTape {
                 Op::Const(..) => {
                     unreachable!("skipped above")
                 }
+                Op::MeshOracle(asset_id, x, y, z) => {
+                    let x_slot = match mapping[x] {
+                        Slot::Reg(r) => r,
+                        Slot::Immediate(_) => unreachable!(
+                            "mesh oracle x input cannot be a literal — \
+                             it must reference Var::X / Y / Z or a \
+                             remap-derived expression"
+                        ),
+                    };
+                    let y_slot = match mapping[y] {
+                        Slot::Reg(r) => r,
+                        Slot::Immediate(_) => unreachable!(
+                            "mesh oracle y input cannot be a literal"
+                        ),
+                    };
+                    let z_slot = match mapping[z] {
+                        Slot::Reg(r) => r,
+                        Slot::Immediate(_) => unreachable!(
+                            "mesh oracle z input cannot be a literal"
+                        ),
+                    };
+                    SsaOp::MeshOracle(i, *asset_id, x_slot, y_slot, z_slot)
+                }
                 Op::Binary(op, lhs, rhs) => {
                     let lhs = mapping[lhs];
                     let rhs = mapping[rhs];
@@ -413,6 +436,11 @@ impl SsaTape {
                 }
                 SsaOp::CopyImm(out, imm) => {
                     println!("${out} = COPY {imm}");
+                }
+                SsaOp::MeshOracle(out, asset_id, x, y, z) => {
+                    println!(
+                        "${out} = MESH_ORACLE {asset_id} ${x} ${y} ${z}"
+                    );
                 }
             }
         }

@@ -683,6 +683,16 @@ fn build_asm_fn_with_storage<A: Assembler>(
 
     for op in t.iter_asm() {
         match op {
+            // The JIT cannot emit code for a host-callback oracle. Programs
+            // that include this op must use the VM evaluator. The fidget
+            // wrapper is responsible for checking `Context::contains_mesh_oracle`
+            // before constructing a JitShape.
+            RegOp::MeshOracle(..) => {
+                panic!(
+                    "MeshOracle op in JIT tape — host should have routed to \
+                     VmShape; check contains_mesh_oracle before JitShape::new"
+                );
+            }
             RegOp::Load(reg, mem) => {
                 asm.build_load(reg, mem);
             }
