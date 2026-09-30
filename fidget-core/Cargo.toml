@@ -23,7 +23,9 @@ workspace-hack.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Feature unification hacks to get webassembly working
-getrandom-04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+# No wasm_js: getrandom 0.4.3 fails to compile with both wasm_js and a
+# custom backend selected; 0.4 calls the same __getrandom_v03_custom hook.
+getrandom-04 = { package = "getrandom", version = "0.4" }
 getrandom-03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 getrandom-02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
