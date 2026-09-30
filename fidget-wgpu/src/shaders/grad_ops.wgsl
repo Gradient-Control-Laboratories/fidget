@@ -21,7 +21,13 @@ fn op_recip(lhs: Value) -> Value {
 
 fn op_sqrt(lhs: Value) -> Value {
     let v = sqrt(lhs.v.w);
-    return Value(vec4f(lhs.v.xyz / (2.0 * v), v));
+    // An argument with no gradient gives none, rather than
+    // 0 / (2 sqrt(0)) = NaN where it is also zero. A length of max(d, 0)
+    // terms (a box's exterior distance) is identically 0 inside, so its
+    // gradient there is 0; the NaN made every hit inside such a shape, which
+    // is where a filled voxel's centre lies, render black.
+    let d = select(lhs.v.xyz / (2.0 * v), vec3f(0.0), all(lhs.v.xyz == vec3f(0.0)));
+    return Value(vec4f(d, v));
 }
 
 fn op_floor(lhs: Value) -> Value {
