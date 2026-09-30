@@ -80,6 +80,19 @@ impl Mesh {
     }
 }
 
+/// Optional progress sink the octree builder pings as parallel subtree
+/// tasks complete. Callers wire this through to whatever UI / IPC
+/// pipeline drives a progress bar; the default `None` keeps the old
+/// behavior. The callback is invoked from rayon worker threads, so it
+/// must be `Send + Sync` and is expected to be cheap (an atomic write,
+/// or a non-blocking IPC dispatch).
+///
+/// `completed` is the number of subtree tasks done; `total` is the
+/// total task count for the build (so callers can render a per-mille
+/// or fractional progress bar without pre-knowing the depth).
+pub type ProgressSink =
+    std::sync::Arc<dyn Fn(u32, u32) + Send + Sync>;
+
 /// Settings when building an octree and mesh
 pub struct Settings<'a> {
     /// Depth to recurse in the octree
@@ -96,6 +109,11 @@ pub struct Settings<'a> {
 
     /// Token to cancel rendering
     pub cancel: CancelToken,
+
+    /// Optional callback invoked as subtree tasks complete during the
+    /// multithreaded octree build. Each call receives `(completed,
+    /// total)` for a determinate progress bar.
+    pub progress: Option<ProgressSink>,
 }
 
 impl Default for Settings<'_> {
@@ -105,6 +123,7 @@ impl Default for Settings<'_> {
             world_to_model: nalgebra::Matrix4::identity(),
             threads: Some(&ThreadPool::Global),
             cancel: CancelToken::new(),
+            progress: None,
         }
     }
 }

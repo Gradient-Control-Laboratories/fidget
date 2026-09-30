@@ -77,7 +77,13 @@ impl Octree {
         let shape = b.shape();
         let vars = b.vars();
         if let Some(threads) = settings.threads {
-            Self::build_inner_mt(shape, settings, vars, threads)
+            Self::build_inner_mt(
+                shape,
+                settings,
+                vars,
+                threads,
+                settings.progress.as_ref(),
+            )
         } else {
             let mut eval = RenderHandle::new(shape.clone());
             let mut out = OctreeBuilder::new(settings, vars);
@@ -96,6 +102,7 @@ impl Octree {
         settings: &Settings,
         vars: &ShapeVars<f32>,
         threads: &ThreadPool,
+        progress: Option<&crate::ProgressSink>,
     ) -> Option<Self> {
         let mut root = Octree::new();
         let mut todo = VecDeque::new();
@@ -131,6 +138,16 @@ impl Octree {
         }
         let mut rh = RenderHandle::new(shape.clone());
         let _ = rh.i_tape(&mut vec![]); // pre-populate interval tape
+        // Atomically count subtree completions and notify the caller's
+        // progress sink. Each rayon worker increments the counter once
+        // its `recurse` returns; the callback receives (completed,
+        // total) so a UI can render a determinate bar.
+        let completed_tasks =
+            std::sync::atomic::AtomicU32::new(0);
+        let total_tasks = todo.len() as u32;
+        if let Some(p) = progress {
+            p(0, total_tasks);
+        }
         let out = threads.run(|| {
             todo.par_iter()
                 .map_init(
@@ -149,6 +166,13 @@ impl Octree {
                             &mut builder.octree,
                             Octree::new(),
                         );
+                        if let Some(p) = progress {
+                            let done = completed_tasks.fetch_add(
+                                1,
+                                std::sync::atomic::Ordering::Relaxed,
+                            ) + 1;
+                            p(done, total_tasks);
+                        }
                         Some(Output {
                             octree,
                             cell: *cell,
@@ -740,12 +764,14 @@ impl<'a, F: Function + RenderHints> OctreeBuilder<'a, F> {
                 // The search must be inside-to-outside
                 debug_assert!(search[0] < 0.0);
                 debug_assert!(search[EDGE_SEARCH_SIZE - 1] >= 0.0);
-                let frac = search
+                let frac = match search
                     .iter()
                     .enumerate()
                     .find(|(_i, v)| **v >= 0.0)
-                    .unwrap()
-                    .0;
+                {
+                    Some((idx, _)) => idx,
+                    None => EDGE_SEARCH_SIZE / 2,
+                };
                 debug_assert!(frac > 0);
                 debug_assert!(frac < EDGE_SEARCH_SIZE);
 
