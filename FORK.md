@@ -14,6 +14,11 @@ compiler for the GSL implicit-modeling language, needs from Fidget: it evaluates
 and meshes GSL fields with Fidget's VM, JIT, dual-contouring mesher and GPU
 renderer. All files stay under MPL-2.0 (see `LICENSE.txt`).
 
+Commits with a `Co-Authored-By: Claude` trailer were prepared with Claude Code.
+Upstream's README sets a no-LLM policy for Fidget and for contributions to it, so
+this fork is not an upstream contribution and none of it is offered as a pull
+request.
+
 Each commit is one change and its message says why. They fall in two groups.
 
 ## Self-contained fixes and additions
