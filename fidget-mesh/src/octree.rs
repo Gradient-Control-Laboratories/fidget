@@ -1018,7 +1018,7 @@ impl LeafHermiteData {
         // Accumulate face QEFs along edges
         for t in [X, Y, Z] {
             let u = t.next();
-            let v = t.next();
+            let v = u.next();
             for face in 0..2 {
                 let a = if face == 1 {
                     t.into()
@@ -1033,25 +1033,25 @@ impl LeafHermiteData {
                     out.face_qefs[f] += leafs[q.index()].face_qefs[f];
                 }
                 // Edges oriented along the v axis on this face
-                let edge_index_v = v.index() * 4 + face * 2 + 1;
+                let edge_index_v = v.index() * 4 + face + 2;
                 out.face_qefs[f] +=
                     leafs[a.index()].intersections[edge_index_v].into();
                 out.face_qefs[f] +=
-                    leafs[b.index()].intersections[edge_index_v].into();
+                    leafs[c.index()].intersections[edge_index_v].into();
 
                 // Edges oriented along the u axis on this face
-                let edge_index_u = v.index() * 4 + face * 2 + 1;
+                let edge_index_u = u.index() * 4 + face * 2 + 1;
                 out.face_qefs[f] +=
                     leafs[a.index()].intersections[edge_index_u].into();
                 out.face_qefs[f] +=
-                    leafs[c.index()].intersections[edge_index_u].into();
+                    leafs[b.index()].intersections[edge_index_u].into();
             }
         }
 
         // Accumulate center QEFs
         for t in [X, Y, Z] {
             let u = t.next();
-            let v = t.next();
+            let v = u.next();
 
             // Accumulate the four inner face QEFs
             let a = Corner::<3>::new(0);
@@ -1699,6 +1699,84 @@ mod test {
             6.0,
             "bad accumulated QEF in center"
         );
+    }
+
+    #[test]
+    fn test_qef_merging_spatial_samples() {
+        let axes = [X, Y, Z];
+        let grad = nalgebra::Vector4::new(1.0, 2.0, 3.0, 0.0);
+        let field = |p: nalgebra::Vector3<f32>| grad.xyz().dot(&p) - 2.7;
+        let crossing = |a: nalgebra::Vector3<f32>, b: nalgebra::Vector3<f32>| {
+            let (fa, fb) = (field(a), field(b));
+            ((fa < 0.0) != (fb < 0.0)).then(|| a + (b - a) * (fa / (fa - fb)))
+        };
+        let mut leafs = [LeafHermiteData::default(); 8];
+        for corner in Corner::<3>::iter() {
+            for edge in 0..12 {
+                let point = |c: Corner<3>| nalgebra::Vector3::from_fn(|axis, _| {
+                    (f32::from(corner & axes[axis]) + f32::from(c & axes[axis])) * 0.5
+                });
+                let (a, b) = Edge::new(edge).corners();
+                if let Some(pos) = crossing(point(a), point(b)) {
+                    leafs[corner.index()].intersections[edge as usize] = LeafIntersection {
+                        pos: pos.push(1.0), grad,
+                    };
+                }
+            }
+        }
+        let mut faces = [nalgebra::Vector4::zeros(); 6];
+        let mut center = nalgebra::Vector4::zeros();
+        for axis in 0..3 {
+            for along in 0..2 {
+                for u in 0..3 {
+                    for v in 0..3 {
+                        let mut a = nalgebra::Vector3::zeros();
+                        a[axis] = along as f32 * 0.5;
+                        a[(axis + 1) % 3] = u as f32 * 0.5;
+                        a[(axis + 2) % 3] = v as f32 * 0.5;
+                        let mut b = a;
+                        b[axis] += 0.5;
+                        if let Some(pos) = crossing(a, b) {
+                            match (u == 1, v == 1) {
+                                (true, true) => center += pos.push(1.0),
+                                (false, true) => faces[(axis + 1) % 3 * 2 + u / 2] += pos.push(1.0),
+                                (true, false) => faces[(axis + 2) % 3 * 2 + v / 2] += pos.push(1.0),
+                                _ => (),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let merged = LeafHermiteData::merge(leafs).unwrap();
+        for (actual, expected) in merged.face_qefs.iter().zip(faces) {
+            assert!((actual.mass_point() - expected).norm() < 1e-6);
+        }
+        assert!((merged.center_qef.mass_point() - center).norm() < 1e-6);
+    }
+
+    #[test]
+    fn test_qef_merging_child_faces() {
+        let axes = [X, Y, Z];
+        let mut leafs = [LeafHermiteData::default(); 8];
+        for corner in Corner::<3>::iter() {
+            for face in 0..6 {
+                let mut pos = nalgebra::Vector3::from_fn(|axis, _| {
+                    f32::from(corner & axes[axis]) * 0.5 + 0.25
+                });
+                pos[face / 2] += if face % 2 == 0 { -0.25 } else { 0.25 };
+                leafs[corner.index()].face_qefs[face].add_intersection(
+                    pos, nalgebra::Vector4::new(1.0, 0.0, 0.0, 0.0),
+                );
+            }
+        }
+        let merged = LeafHermiteData::merge(leafs).unwrap();
+        for (face, actual) in merged.face_qefs.iter().enumerate() {
+            let mut expected = nalgebra::Vector4::new(2.0, 2.0, 2.0, 4.0);
+            expected[face / 2] = if face % 2 == 0 { 0.0 } else { 4.0 };
+            assert_eq!(actual.mass_point(), expected);
+        }
+        assert_eq!(merged.center_qef.mass_point(), nalgebra::Vector4::new(6.0, 6.0, 6.0, 12.0));
     }
 
     #[test]
