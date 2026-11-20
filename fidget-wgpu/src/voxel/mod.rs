@@ -1,6 +1,7 @@
 //! Voxel (3D) evaluaton and post-processing
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
+pub mod channels;
 pub mod color;
 pub mod heightmap;
 pub mod merge;
@@ -615,5 +616,114 @@ mod test {
             out.colors.len()
         );
         println!("{color_set:#x?}");
+    }
+
+    #[test]
+    fn voxel_channels() {
+        crate::require_gpu!();
+        let size = 64u32;
+        let size_ = VoxelSize::from(size);
+
+        let gpu = pollster::block_on(Gpu::init_basic()).unwrap();
+        let voxel_ctx = render::Context::new(&gpu);
+        let merge_ctx = merge::Context::new(&gpu);
+        let channels_ctx = channels::Context::new(&gpu);
+
+        // A sphere with radius 0.5, rendered into a merged image
+        let (x, y, z) = Tree::axes();
+        let sphere =
+            (x.square() + y.square() + z.square()).sqrt() - Tree::constant(0.5);
+        let shape = gpu.build_render_shape(&VmShape::from(sphere)).unwrap();
+        let mut workspace = voxel_ctx.workspace();
+        let mut buffers = voxel_ctx.buffers(size_).unwrap();
+        let mut merge_workspace = merge_ctx.workspace();
+        let mut merge_buf = merge_ctx.buffers(size_).unwrap();
+        voxel_ctx
+            .submit(&shape, Default::default(), &mut workspace, &mut buffers)
+            .unwrap();
+        merge_ctx
+            .submit(
+                &buffers,
+                Default::default(),
+                &mut merge_workspace,
+                &mut merge_buf,
+            )
+            .unwrap();
+        let merged = gpu.read_vec(merge_buf.output());
+
+        // Three channels, none of which fits a color: above 1, below 0, and
+        // one that varies across the surface
+        let tapes = vec![vec![
+            VmShape::from(Tree::constant(2.5)),
+            VmShape::from(Tree::constant(-3.0)),
+            VmShape::from(x * 2.0),
+        ]];
+        let channels = gpu.build_render_channels(&tapes, 3).unwrap();
+        let mut channels_workspace = channels_ctx.workspace();
+        let mut channels_buf = channels_ctx
+            .buffers(channels::ChannelSize {
+                size: size_,
+                channels: 3,
+            })
+            .unwrap();
+        channels_ctx
+            .submit(
+                channels::Args {
+                    image: &merge_buf,
+                    channels: &channels,
+                },
+                Default::default(),
+                &mut channels_workspace,
+                &mut channels_buf,
+            )
+            .unwrap();
+
+        let out = gpu.read_vec(channels_buf.output());
+        assert_eq!(out.len(), (size * size * 3) as usize);
+
+        let mut varying = vec![];
+        for (m, c) in merged.iter().zip(out.chunks_exact(3)) {
+            if m.z == 0 {
+                // empty pixels are zero in every channel
+                assert_eq!(c, [0.0; 3]);
+            } else {
+                // values past 0 and 1 survive, unclamped
+                assert_eq!(c[0], 2.5);
+                assert_eq!(c[1], -3.0);
+                varying.push(c[2]);
+            }
+        }
+        assert!(!varying.is_empty(), "no pixel was filled");
+        let (lo, hi) = varying
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+        // 2x across a sphere of radius 0.5 spans about -1 to 1
+        assert!(
+            lo < -0.5 && hi > 0.5 && lo >= -1.1 && hi <= 1.1,
+            "{lo}..{hi}"
+        );
+
+        // The channel count must match between buffers and shapes
+        let mut wrong = channels_ctx
+            .buffers(channels::ChannelSize {
+                size: size_,
+                channels: 2,
+            })
+            .unwrap();
+        let err = channels_ctx
+            .submit(
+                channels::Args {
+                    image: &merge_buf,
+                    channels: &channels,
+                },
+                Default::default(),
+                &mut channels_workspace,
+                &mut wrong,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            channels::ChannelError::BadChannelCount { .. }
+        ));
     }
 }

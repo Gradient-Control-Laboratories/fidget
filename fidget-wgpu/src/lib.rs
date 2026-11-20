@@ -228,6 +228,7 @@ use std::sync::Arc;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 pub mod buf;
+pub mod channels;
 pub mod color;
 pub mod pixel;
 pub mod voxel;
@@ -360,7 +361,7 @@ pub struct Gpu {
     /// Layout for a color bind group
     ///
     /// This is used when building [`RenderColor`](crate::color::RenderColor)
-    /// handles.
+    /// and [`RenderChannels`](crate::channels::RenderChannels) handles.
     ///
     /// It binds three buffers:
     /// - 0: `shape_tape`
@@ -678,6 +679,26 @@ impl Gpu {
     ) -> Result<color::RenderColor, color::RenderColorError> {
         color::RenderColor::new(
             colors,
+            &self.device,
+            &self.color_bind_group_layout,
+        )
+    }
+
+    /// Builds a new set of render channels
+    ///
+    /// Each entry of `shapes` is one shape's list of `channels` channel tapes,
+    /// evaluated at a pixel's hit voxel as `channels` unclamped floats.
+    ///
+    /// # Panics
+    /// If a shape does not have exactly `channels` tapes
+    pub fn build_render_channels(
+        &self,
+        shapes: &[Vec<VmShape>],
+        channels: usize,
+    ) -> Result<channels::RenderChannels, channels::RenderChannelsError> {
+        channels::RenderChannels::new(
+            shapes,
+            channels,
             &self.device,
             &self.color_bind_group_layout,
         )
