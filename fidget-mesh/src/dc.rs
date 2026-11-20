@@ -188,11 +188,6 @@ pub fn dc_edge<T: Frame>(
 
         let verts = verts.map(Option::unwrap);
 
-        // Pick the intersection vertex based on the deepest cell
-        let i = out.vertex(
-            leafs[deepest].index + verts[deepest].edge.0 as usize,
-            &octree.verts,
-        );
         // Helper function to extract other vertices
         let mut vert = |i: usize| {
             out.vertex(leafs[i].index + verts[i].vert.0 as usize, &octree.verts)
@@ -203,12 +198,7 @@ pub fn dc_edge<T: Frame>(
         //
         // As always, we have to sample the deepest leaf's edge to be sure that
         // we get the correct value.
-        let winding = if starting_sign { 3 } else { 1 };
-        for j in 0..4 {
-            if cs[j].index != cs[(j + winding) % 4].index {
-                out.triangle(vs[j], vs[(j + winding) % 4], i)
-            }
-        }
+        out.quad(if starting_sign { [vs[0], vs[3], vs[2], vs[1]] } else { vs });
     } else {
         let (t, u, v) = T::frame();
 

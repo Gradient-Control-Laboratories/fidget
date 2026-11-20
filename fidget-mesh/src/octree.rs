@@ -1249,7 +1249,8 @@ mod test {
         let sphere_mesh = octree.walk_dual();
 
         let mut edge_count = 0;
-        for v in &sphere_mesh.vertices {
+        for vertex in &octree.verts {
+            let v = &vertex.pos;
             // Edge vertices should be found via binary search and therefore
             // should be close to the true crossing point
             let x_edge = v.x != 0.0;
@@ -1274,7 +1275,8 @@ mod test {
                 );
             }
         }
-        assert_eq!(edge_count, 6);
+        assert_eq!(edge_count, 24);
+        assert_eq!(sphere_mesh.vertices.len(), 8);
     }
 
     #[test]
