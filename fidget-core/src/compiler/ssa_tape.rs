@@ -113,6 +113,7 @@ impl SsaTape {
                 // Constants are skipped, because they become immediates
                 continue;
             };
+            let mut loads = vec![];
             let op = match op {
                 Op::Input(v) => {
                     let arg = vars[v];
@@ -122,26 +123,22 @@ impl SsaTape {
                     unreachable!("skipped above")
                 }
                 Op::MeshOracle(asset_id, x, y, z) => {
-                    let x_slot = match mapping[x] {
+                    // The oracle reads registers only. An input folded to a
+                    // constant, as noiseHash3([cx, cy, 23]) folds its z, is
+                    // loaded into a fresh slot, the way a constant output is
+                    // above; pushed after the oracle, the load runs first.
+                    let mut reg = |slot: Slot| match slot {
                         Slot::Reg(r) => r,
-                        Slot::Immediate(_) => unreachable!(
-                            "mesh oracle x input cannot be a literal — \
-                             it must reference Var::X / Y / Z or a \
-                             remap-derived expression"
-                        ),
+                        Slot::Immediate(imm) => {
+                            let o = slot_count;
+                            slot_count += 1;
+                            loads.push(SsaOp::CopyImm(o, imm));
+                            o
+                        }
                     };
-                    let y_slot = match mapping[y] {
-                        Slot::Reg(r) => r,
-                        Slot::Immediate(_) => unreachable!(
-                            "mesh oracle y input cannot be a literal"
-                        ),
-                    };
-                    let z_slot = match mapping[z] {
-                        Slot::Reg(r) => r,
-                        Slot::Immediate(_) => unreachable!(
-                            "mesh oracle z input cannot be a literal"
-                        ),
-                    };
+                    let x_slot = reg(mapping[x]);
+                    let y_slot = reg(mapping[y]);
+                    let z_slot = reg(mapping[z]);
                     SsaOp::MeshOracle(i, *asset_id, x_slot, y_slot, z_slot)
                 }
                 Op::Binary(op, lhs, rhs) => {
@@ -271,6 +268,7 @@ impl SsaTape {
                 }
             };
             tape.push(op);
+            tape.extend(loads);
         }
 
         Ok((
@@ -450,6 +448,49 @@ impl SsaTape {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn test_mesh_oracle_constant_coordinates() {
+        use crate::{
+            mesh_oracle::{self, MeshOracle},
+            shape::EzShape,
+            types::{Grad, Interval},
+            vm::VmShape,
+        };
+
+        struct Plane;
+        impl MeshOracle for Plane {
+            fn point(&self, x: f32, y: f32, z: f32) -> f32 {
+                x + 2.0 * y + 3.0 * z
+            }
+            fn interval(&self, x: Interval, y: Interval, z: Interval) -> Interval {
+                x + y * 2.0 + z * 3.0
+            }
+            fn grad(&self, x: f32, y: f32, z: f32) -> Grad {
+                Grad::new(self.point(x, y, z), 1.0, 2.0, 3.0)
+            }
+        }
+
+        mesh_oracle::register(0x7fff_ff01, std::sync::Arc::new(Plane));
+        for mask in 1..8 {
+            let mut ctx = Context::new();
+            let axes = ctx.axes();
+            let constants = [ctx.constant(2.0), ctx.constant(3.0), ctx.constant(4.0)];
+            let [x, y, z] = std::array::from_fn(|i| {
+                if mask & (1 << i) != 0 { constants[i] } else { axes[i] }
+            });
+            let node = ctx.mesh_oracle(0x7fff_ff01, x, y, z);
+            let shape = VmShape::new(&ctx, node).unwrap();
+            let tape = shape.ez_grad_slice_tape();
+            let mut eval = VmShape::new_grad_slice_eval();
+            let samples = eval.eval(&tape,
+                &[Grad::new(2.0, 1.0, 0.0, 0.0)],
+                &[Grad::new(3.0, 0.0, 1.0, 0.0)],
+                &[Grad::new(4.0, 0.0, 0.0, 1.0)]).unwrap();
+            let expected = |axis| if mask & (1 << axis) == 0 { (axis + 1) as f32 } else { 0.0 };
+            assert_eq!(samples[0], Grad::new(20.0, expected(0), expected(1), expected(2)));
+        }
+    }
 
     #[test]
     fn test_ring() {
